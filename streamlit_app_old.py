@@ -1,17 +1,18 @@
 import streamlit as st
 import pandas as pd
-import random
 import sqlite3
 import uuid
 from datetime import datetime
+import random
 import re
 
 # =========================
 # 기본 설정
 # =========================
-st.set_page_config(page_title="한국어 어휘 문제 자동 출제", layout="wide")
-st.title("📘 한국어 어휘 문제 자동 출제 (뜻 → 단어 입력)")
+st.set_page_config(page_title="한국어 문제 자동 출제/풀이", layout="wide")
+st.title("📘 한국어 문제 자동 출제/풀이 (TOPIK 1~6급)")
 
+PDF_PATH = "한국어교수학습샘터-문법·표현 내용 검색-거니와 (1).pdf"
 XLSX_PATH = "한국어능력시험(TOPIK) 1급~6급(초급~고급) 급수별 어휘목록 (1).xlsx"
 DB_PATH = "app.db"
 
@@ -27,8 +28,8 @@ def init_db():
     cur.execute("""
     CREATE TABLE IF NOT EXISTS results (
         id TEXT,
-        meaning TEXT,
-        correct_word TEXT,
+        question TEXT,
+        answer TEXT,
         student_answer TEXT,
         correct INTEGER,
         created_at TEXT
@@ -40,60 +41,42 @@ def init_db():
 init_db()
 
 # =========================
-# 어휘 로드
+# 데이터 로드
 # =========================
 @st.cache_data
 def load_vocab():
     df = pd.read_excel(XLSX_PATH)
-    df.columns = [c.strip() for c in df.columns]
-
-    WORD_COL = "어휘"
-    MEAN_COL = "길잡이말"
-    LEVEL_COL = "등급"
-
-    for col in [WORD_COL, MEAN_COL, LEVEL_COL]:
-        if col not in df.columns:
-            st.error(f"엑셀에 '{col}' 컬럼이 없습니다. 현재 컬럼: {list(df.columns)}")
-            st.stop()
-
-    vocab = {i: [] for i in range(1, 7)}
-
-    for _, row in df.iterrows():
-        word = str(row[WORD_COL]).strip()
-        meaning = str(row[MEAN_COL]).strip()
-        level_raw = str(row[LEVEL_COL])
-
-        digits = re.findall(r"[1-6]", level_raw)
-        if not digits:
-            continue
-
-        level = max(int(d) for d in digits)
-
-        if word and meaning:
-            vocab[level].append((word, meaning))
-
+    df = df.astype(str)
+    vocab = {}
+    for i in range(1, 7):
+        vocab[i] = df[df.iloc[:,1].str.contains(str(i))].iloc[:,0].tolist()
     return vocab
 
-vocab_by_level = load_vocab()
+try:
+    vocab_by_level = load_vocab()
+except:
+    st.error("❌ TOPIK 어휘 엑셀을 읽지 못했습니다. 파일이 같은 폴더에 있는지 확인하세요.")
+    st.stop()
 
 # =========================
-# 문제 생성 (뜻 → 단어)
+# 문제 생성
 # =========================
-def generate_questions(level: int):
-    pool = vocab_by_level[level]
-    if len(pool) < 5:
+def make_questions(level: int):
+    words = vocab_by_level[level]
+    if len(words) < 5:
         return []
 
-    selected = random.sample(pool, 5)
     questions = []
+    chosen = random.sample(words, 5)
 
-    for word, meaning in selected:
+    for w in chosen:
+        q = f"다음 빈칸에 알맞은 단어를 쓰세요.\n나는 ___을/를 좋아합니다."
         questions.append({
             "id": str(uuid.uuid4()),
-            "meaning": meaning,
-            "answer": word
+            "question": q,
+            "answer": w,
+            "explanation": f"정답은 '{w}'입니다."
         })
-
     return questions
 
 # =========================
@@ -110,20 +93,20 @@ if mode == "교사":
         format_func=lambda x: f"{x}급"
     )
 
-    st.caption(f"현재 {level}급 어휘 수: {len(vocab_by_level[level])}개")
+    st.caption(f"📌 현재 {level}급 어휘 수: {len(vocab_by_level[level])}개")
 
     if st.button("✅ 문제 5개 생성"):
-        qs = generate_questions(level)
+        qs = make_questions(level)
         if not qs:
-            st.error("어휘가 부족해 문제를 만들 수 없습니다.")
+            st.error("문제를 만들 수 없습니다. 어휘 수가 너무 적습니다.")
         else:
             st.session_state["questions"] = qs
             st.success("문제 생성 완료!")
 
     if "questions" in st.session_state:
-        st.markdown("### 📄 생성된 문제 (정답 확인용)")
+        st.markdown("### 📄 생성된 문제")
         for i, q in enumerate(st.session_state["questions"], 1):
-            st.write(f"{i}. 뜻: {q['meaning']}")
+            st.write(f"**{i}.** {q['question']}")
             st.caption(f"정답: {q['answer']}")
 
 elif mode == "학생":
@@ -135,11 +118,8 @@ elif mode == "학생":
 
     answers = []
     for i, q in enumerate(st.session_state["questions"], 1):
-        ans = st.text_input(
-            f"{i}. 다음 뜻에 알맞은 단어를 쓰세요.\n👉 {q['meaning']}",
-            key=q["id"]
-        )
-        answers.append((q, ans.strip()))
+        ans = st.text_input(f"{i}. {q['question']}", key=q["id"])
+        answers.append((q, ans))
 
     if st.button("📤 제출"):
         score = 0
@@ -147,13 +127,13 @@ elif mode == "학생":
         cur = conn.cursor()
 
         for q, ans in answers:
-            correct = int(ans == q["answer"])
+            correct = int(ans.strip() == q["answer"])
             score += correct
             cur.execute(
                 "INSERT INTO results VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     q["id"],
-                    q["meaning"],
+                    q["question"],
                     q["answer"],
                     ans,
                     correct,
@@ -167,9 +147,9 @@ elif mode == "학생":
         st.success(f"총 {score}/5 정답입니다!")
 
         for q, ans in answers:
-            if ans == q["answer"]:
-                st.success(f"✅ {q['meaning']} → {q['answer']}")
+            if ans.strip() != q["answer"]:
+                st.error(f"❌ 오답: {q['answer']}")
             else:
-                st.error(f"❌ {q['meaning']} → 정답: {q['answer']}")
+                st.success("✅ 정답")
 
 
